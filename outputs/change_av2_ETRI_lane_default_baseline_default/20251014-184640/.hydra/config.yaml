@@ -1,0 +1,58 @@
+datamodule:
+  name: av2_ETRI_lane
+  phase: default
+  target:
+    _target_: src.datamodule.av2_datamodule.Av2DataModule
+    data_root: data/DeMo_ETRI_processed_lane
+    train_batch_size: ${batch_size}
+    val_batch_size: ${batch_size}
+    test_batch_size: ${batch_size}
+    shuffle: true
+    num_workers: ${num_workers}
+    pin_memory: true
+    dataset:
+      num_historical_steps: 20
+      sequence_origins:
+      - 20
+      radius: 150.0
+      train_mode: focal_and_scored
+model:
+  name: baseline
+  phase: default
+  target:
+    _target_: src.model.trainer_forecast.Trainer
+    model:
+      type: ModelForecast
+      embed_dim: 128
+      future_steps: 60
+      num_heads: 8
+      mlp_ratio: 4.0
+      qkv_bias: false
+      drop_path: 0.4
+    pretrained_weights: ${pretrained_weights}
+    lr: ${lr}
+    weight_decay: ${weight_decay}
+    epochs: ${epochs}
+    warmup_epochs: ${warmup_epochs}
+seed: 2024
+monitor: val_minFDE6
+save_top_k: 10
+data_root: data/DeMo_ETRI_processed_lane
+checkpoint: null
+pretrained_weights: DeMo.ckpt
+output: change_${datamodule.name}_${datamodule.phase}_${model.name}_${model.phase}
+num_workers: 4
+gpus: 1
+sync_bn: true
+batch_size: 4
+epochs: 150
+warmup_epochs: 10
+lr: 5.0e-06
+weight_decay: 0.02
+gradient_clip_val: 5
+gradient_clip_algorithm: norm
+limit_train_batches: null
+limit_val_batches: null
+limit_test_batches: null
+log_model: all
+test: false

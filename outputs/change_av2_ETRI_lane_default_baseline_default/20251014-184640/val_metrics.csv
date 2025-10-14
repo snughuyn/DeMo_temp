@@ -1,0 +1,2 @@
+epoch,val_minADE1,val_minADE6,val_new_minADE1,val_new_minADE6,new_minADE_avg
+0,3.050594,1.397836,3.330903,1.549455,2.440179

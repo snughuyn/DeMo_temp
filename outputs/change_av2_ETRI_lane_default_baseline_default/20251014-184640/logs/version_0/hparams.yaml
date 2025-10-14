@@ -1,0 +1,13 @@
+model:
+  type: ModelForecast
+  embed_dim: 128
+  future_steps: 60
+  num_heads: 8
+  mlp_ratio: 4.0
+  qkv_bias: false
+  drop_path: 0.4
+pretrained_weights: DeMo.ckpt
+lr: 5.0e-06
+warmup_epochs: 10
+epochs: 150
+weight_decay: 0.02
