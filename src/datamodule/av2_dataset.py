@@ -4,35 +4,44 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset
+from tqdm import tqdm
+import re
 
+_FRAME_ID_RE = re.compile(r"log_([^_]+)_(\d+)")
+
+def get_frame_id(file_path: Path) -> int:
+    """파일 경로에서 프레임 ID를 정수형으로 추출합니다."""
+    match = _FRAME_ID_RE.search(file_path.stem)
+    if match:
+        return int(match.group(2))
+    return -1
 
 class Av2Dataset(Dataset):
     def __init__(
         self,
         data_root: Path,
         split: str = None,
-        num_historical_steps: int = 50,
-        sequence_origins: List[int] = [50],
+        num_historical_steps: int = 20,
+        sequence_origins: List[int] = [20],
         radius: float = 150.0,
         train_mode: str = 'only_focal',
 
     ):
-        assert sequence_origins[-1] == 50 and num_historical_steps <= 50
+        assert sequence_origins[-1] == 20 and num_historical_steps <= 20
         assert train_mode in ['only_focal', 'focal_and_scored']
         assert split in ['train', 'val', 'test']
         super(Av2Dataset, self).__init__()
-        
+
         self.data_folder = Path(data_root) / split
-        self.file_list = sorted(list(self.data_folder.glob('*.pt')))
+        # 파일을 시나리오와 프레임 순서로 정렬합니다.
+        self.file_list = sorted(list(self.data_folder.glob('*.pt')), key=lambda p: (p.stem.split('_')[1], get_frame_id(p)))
         self.num_historical_steps = num_historical_steps
         self.num_future_steps = 0 if split =='test' else 60
         self.sequence_origins = sequence_origins
         self.mode = 'only_focal' if split != 'train' else train_mode
         self.radius = radius
 
-        print(
-            f'data root: {data_root}/{split}, total number of files: {len(self.file_list)}'
-        )
+        print(f'data root: {data_root}/{split}, total number of files: {len(self.file_list)}')
 
     def __len__(self) -> int:
         return len(self.file_list)
@@ -47,17 +56,16 @@ class Av2Dataset(Dataset):
         train_idx = [data['focal_idx']]
         
         # 'only_focal' for single-agent setting, 'focal_and_scored' for multi-agent setting
-        if self.mode == 'focal_and_scored':
-            train_idx += data['scored_idx']
+        train_idx += data['scored_idx']
         
         for cur_step in self.sequence_origins:
             for ag_idx in train_idx:
                 ag_dict = self.process_single_agent(data, ag_idx, cur_step)
-            sequence_data.append(ag_dict)
+                sequence_data.append(ag_dict)
         
         return sequence_data
 
-    def process_single_agent(self, data, idx, step=50):
+    def process_single_agent(self, data, idx, step=20):
         # info for cur_agent on cur_step
         cur_agent_id = data['agent_ids'][idx]
         origin = data['x_positions'][idx, step - 1].double()
@@ -93,6 +101,7 @@ class Av2Dataset(Dataset):
         l_is_int = data['is_intersections']
         l_pos = torch.matmul(l_pos.reshape(-1, 2).double() - origin, rotate_mat).reshape(-1, l_pos.size(1), 2).to(torch.float32)
 
+
         l_ctr = l_pos[:, 9:11].mean(dim=1)
         l_head = torch.atan2(
             l_pos[:, 10, 1] - l_pos[:, 9, 1],
@@ -125,6 +134,34 @@ class Av2Dataset(Dataset):
         vel = vel[ag_mask]
         attr = attr[ag_mask]
         valid_mask = valid_mask[ag_mask]
+        # ===== lane-aware: find nearest lane for focal agent ===== #add eun
+        focal_cur_pos = pos[0, self.num_historical_steps - 1, :2].float()
+
+        if l_pos.size(0) > 0:
+            # 1) 차선 중심과의 거리로 가장 가까운 lane 선택
+            lane_centers = l_pos[:, 9:11].mean(dim=1)
+            lane_dists_to_center = torch.norm(lane_centers - focal_cur_pos[None, :], dim=-1)
+            nearest_lane_idx = torch.argmin(lane_dists_to_center)
+            nearest_lane_form = l_attr[nearest_lane_idx, 1].long().view(1)
+
+            # 2) focal 위치에서 각 차선 포인트까지 최소 거리 (offset)
+            flat_l_pos = l_pos.reshape(-1, 2)
+            flat_l_valid = l_valid_mask.reshape(-1)
+            valid_flat_l_pos = flat_l_pos[flat_l_valid].float()
+
+            min_offset_dist = torch.tensor([[8.0]]).float()  # 기본값 [1,1]
+
+            if valid_flat_l_pos.size(0) > 0:
+                dists_to_all_lane_points = torch.cdist(focal_cur_pos.unsqueeze(0), valid_flat_l_pos)
+                min_offset_dist = dists_to_all_lane_points.min().float().unsqueeze(0).unsqueeze(1)
+
+            if min_offset_dist.item() > 8.0:
+                nearest_lane_form = torch.tensor([0]).long().view(1)
+                min_offset_dist = torch.tensor([[8.0]]).float()
+        else:
+            nearest_lane_form = torch.tensor([0]).long().view(1)
+            min_offset_dist = torch.tensor([[8.0]]).float()
+        # ============================================================
 
         # post_process
         head = head[:, :self.num_historical_steps]
@@ -203,6 +240,7 @@ class Av2Dataset(Dataset):
             'lane_centers': l_ctr,
             'lane_angles': l_head,
             'lane_attr': l_attr,
+        
             'lane_valid_mask': l_valid_mask,
             'is_intersections': l_is_int,
             
@@ -211,58 +249,61 @@ class Av2Dataset(Dataset):
             'scenario_id': data['scenario_id'],
             'track_id': cur_agent_id,
             'city': data['city'],
-            'timestamp': torch.Tensor([step * 0.1])
+            'timestamp': torch.Tensor([step * 0.1]),
+            'lane_form_type': nearest_lane_form,  # add eun
+            'lane_offset_dist': min_offset_dist,
         }
+
     
-
 def collate_fn(seq_batch):
-    seq_data = []
-    for i in range(len(seq_batch[0])):
-        batch = [b[i] for b in seq_batch]
-        data = {}
+    # seq_batch는 [[scene1_agents], [scene2_agents], ...] 형태입니다.
+    # 이것을 [agent1, agent2, agent3, ...] 형태의 단일 리스트로 만듭니다.
+    flat_batch = []
+    for sample in seq_batch:
+        for agent in sample:
+            flat_batch.append(agent)
 
-        for key in [
-            'x_positions_diff',
-            'x_attr',
-            'x_positions',
-            'x_centers',
-            'x_angles',
-            'x_velocity',
-            'x_velocity_diff',
-            'lane_positions',
-            'lane_centers',
-            'lane_angles',
-            'lane_attr',
-            'is_intersections',
-        ]:
-            data[key] = pad_sequence([b[key] for b in batch], batch_first=True)
+    if not flat_batch:
+        return {}
 
-        if 'x_scored' in batch[0]:
-            data['x_scored'] = pad_sequence(
-                [b['x_scored'] for b in batch], batch_first=True
-            )
+    data = {}
+    
+    # 이제부터는 `flat_batch`를 사용하여 모든 작업을 수행합니다.
+    for key in [
+        'x_positions_diff', 'x_attr', 'x_positions', 'x_centers',
+        'x_angles', 'x_velocity', 'x_velocity_diff',
+        'lane_positions', 'lane_centers', 'lane_angles', 'lane_attr',
+        'is_intersections'
+    ]:
+        if key in flat_batch[0]:
+            data[key] = pad_sequence([b[key] for b in flat_batch], batch_first=True)
 
-        if batch[0]['target'] is not None:
-            data['target'] = pad_sequence([b['target'] for b in batch], batch_first=True)
-            data['target_diff'] = pad_sequence([b['target_diff'] for b in batch], batch_first=True)
-            data['target_vel_diff'] = pad_sequence([b['target_vel_diff'] for b in batch], batch_first=True)
-            data['target_mask'] = pad_sequence(
-                [b['target_mask'] for b in batch], batch_first=True, padding_value=False
-            )
+    if 'x_scored' in flat_batch[0]:
+        data['x_scored'] = pad_sequence([b['x_scored'] for b in flat_batch], batch_first=True)
 
-        for key in ['x_valid_mask', 'lane_valid_mask']:
-            data[key] = pad_sequence(
-                [b[key] for b in batch], batch_first=True, padding_value=False
-            )
+    if all(b.get('target') is not None for b in flat_batch):
+        data['target']         = pad_sequence([b['target'] for b in flat_batch], batch_first=True)
+        data['target_diff']    = pad_sequence([b['target_diff'] for b in flat_batch], batch_first=True)
+        data['target_vel_diff']= pad_sequence([b['target_vel_diff'] for b in flat_batch], batch_first=True)
+        data['target_mask']    = pad_sequence([b['target_mask'] for b in flat_batch], batch_first=True, padding_value=False)
 
-        data['x_key_valid_mask'] = data['x_valid_mask'].any(-1)
-        data['lane_key_valid_mask'] = data['lane_valid_mask'].any(-1)
+    for key in ['x_valid_mask', 'lane_valid_mask']:
+        data[key] = pad_sequence([b[key] for b in flat_batch], batch_first=True, padding_value=False)
 
-        data['scenario_id'] = [b['scenario_id'] for b in batch]
-        data['track_id'] = [b['track_id'] for b in batch]
+    data['x_key_valid_mask']   = data['x_valid_mask'].any(-1)
+    data['lane_key_valid_mask']= data['lane_valid_mask'].any(-1)
 
-        data['origin'] = torch.cat([b['origin'] for b in batch], dim=0)
-        data['theta'] = torch.cat([b['theta'] for b in batch])
-        data['timestamp'] = torch.cat([b['timestamp'] for b in batch])
-        seq_data.append(data)
-    return seq_data
+    data['scenario_id'] = [b['scenario_id'] for b in flat_batch]
+    data['track_id']    = [b['track_id'] for b in flat_batch]
+
+    data['origin']   = torch.cat([b['origin']   for b in flat_batch], dim=0)
+    data['theta']    = torch.cat([b['theta']    for b in flat_batch], dim=0)
+    data['timestamp']= torch.cat([b['timestamp']for b in flat_batch], dim=0)
+    
+    if 'lane_form_type' in flat_batch[0]:
+        data['lane_form_type'] = torch.cat([b['lane_form_type'] for b in flat_batch])
+        
+    if 'lane_offset_dist' in flat_batch[0]:
+        data['lane_offset_dist'] = torch.cat([b['lane_offset_dist'] for b in flat_batch], dim=0)
+
+    return data

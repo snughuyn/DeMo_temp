@@ -52,7 +52,7 @@ class Av2Extractor:
         num_nodes = len(actor_ids)
 
         x = torch.zeros(num_nodes, 110, 2, dtype=torch.float)
-        x_attr = torch.zeros(num_nodes, 3, dtype=torch.uint8)
+        x_attr = torch.zeros(num_nodes, 3, dtype=torch.long)
         x_heading = torch.zeros(num_nodes, 110, dtype=torch.float)
         x_velocity = torch.zeros(num_nodes, 110, dtype=torch.float)
         padding_mask = torch.ones(num_nodes, 110, dtype=torch.bool)

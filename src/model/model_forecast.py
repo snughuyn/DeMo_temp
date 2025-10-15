@@ -32,6 +32,11 @@ class ModelForecast(nn.Module):
             nn.GELU(),
             nn.Linear(64, embed_dim),
         )
+        self.lane_query_mlp = nn.Sequential( #add eun
+            nn.Linear(embed_dim * 2 + 1, embed_dim), # 변경: offset 피처 1차원 추가
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )       
 
         # Agent Encoding Mamba
         self.hist_embed_mamba = nn.ModuleList(  
@@ -71,7 +76,8 @@ class ModelForecast(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
-        self.lane_type_embed = nn.Parameter(torch.Tensor(3, embed_dim))
+        self.lane_type_embed = nn.Parameter(torch.Tensor(3, embed_dim)) 
+        self.lane_form_embed = nn.Parameter(torch.Tensor(9, embed_dim)) #add eun
 
         self.dense_predictor = nn.Sequential(
             nn.Linear(embed_dim, 256), nn.GELU(), nn.Linear(256, future_steps * 2)
@@ -88,6 +94,7 @@ class ModelForecast(nn.Module):
     def initialize_weights(self):
         nn.init.normal_(self.actor_type_embed, std=0.02)
         nn.init.normal_(self.lane_type_embed, std=0.02)
+        nn.init.normal_(self.lane_form_embed, std=0.02)  # add eun
 
         self.apply(self._init_weights)
 
@@ -102,10 +109,23 @@ class ModelForecast(nn.Module):
 
     def load_from_checkpoint(self, ckpt_path):
         ckpt = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-        state_dict = {
-            k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")
+
+        # "net." prefix 제거
+        state_dict = {k[len("net.") :]: v for k, v in ckpt.items() if k.startswith("net.")}
+
+        # ✅ Shape mismatch 나는 key들 제거
+        skip_keys = [
+            "lane_form_embed"
+        ]
+        filtered_state_dict = {
+            k: v for k, v in state_dict.items()
+            if not any(skip in k for skip in skip_keys)
         }
-        return self.load_state_dict(state_dict=state_dict, strict=False)
+
+        missing, unexpected = self.load_state_dict(state_dict=filtered_state_dict, strict=False)
+        print(f"Loaded checkpoint partially (skipped {skip_keys})")
+        print(f"Missing keys: {missing}")
+        print(f"Unexpected keys: {unexpected}")
 
     def forward(self, data):
         ###### Scene context encoding ###### 
@@ -145,6 +165,7 @@ class ModelForecast(nn.Module):
         actor_feat_tmp = torch.zeros(
             B * N, actor_feat.shape[-1], device=actor_feat.device
         )
+        actor_feat_tmp = actor_feat_tmp.to(actor_feat.dtype)
         actor_feat_tmp[hist_feat_key_valid] = actor_feat
         actor_feat = actor_feat_tmp.view(B, N, actor_feat.shape[-1])
 
@@ -167,8 +188,12 @@ class ModelForecast(nn.Module):
 
         actor_type_embed = self.actor_type_embed[data["x_attr"][..., 2].long()]
         lane_type_embed = self.lane_type_embed[data["lane_attr"][..., 0].long()]
+        lane_form_idx = data["lane_attr"][..., 1]  # ETRI: 차선 형태
+        lane_form_embed = self.lane_form_embed[lane_form_idx.long()]
+
+        
         actor_feat += actor_type_embed
-        lane_feat += lane_type_embed
+        lane_feat += lane_type_embed + lane_form_embed #add eun
 
         # scene context features
         x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
@@ -216,7 +241,10 @@ class ModelForecast(nn.Module):
 
         # outputs of other agents
         x_others = x_encoder[:, 1:N]
-        y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
+        y_hat_others = None  # 먼저 None으로 초기화
+        if N > 1:
+            x_others = x_encoder[:, 1:N]
+            y_hat_others = self.dense_predictor(x_others).view(B, x_others.size(1), -1, 2)
 
         # state query initialization
         time = torch.arange(60).long().to(x_encoder.device)
@@ -224,10 +252,29 @@ class ModelForecast(nn.Module):
         time = time.unsqueeze(-1)
         mode = self.time_embedding_mlp(time)
         mode = mode.repeat(x_encoder.size(0), 1, 1)
+        lane_form_idx = data["lane_form_type"].to(x_encoder.device)
+        lane_form_embed_agent = self.lane_form_embed[lane_form_idx.long()]  # (B, D)
+
+        # concat time + lane form embedding
+        lane_form_expand = lane_form_embed_agent.unsqueeze(1).expand(-1, mode.size(1), -1)
+        lane_condition_input = torch.cat([mode, lane_form_expand], dim=-1)
+
+        lane_offset_dist = data["lane_offset_dist"].to(x_encoder.device).view(-1, 1, 1).expand(-1, mode.size(1), -1)
+        lane_form_expand = lane_form_embed_agent.unsqueeze(1).expand(-1, mode.size(1), -1)
+        lane_condition_input = torch.cat([mode, lane_form_expand, lane_offset_dist], dim=-1)
+        
+        mode = self.lane_query_mlp(lane_condition_input)  # (B, 60, D)
 
         # decoder module with decoupled queries
-        dense_predict, y_hat, pi, x_mode, new_y_hat, new_pi, mode_dense, scal, scal_new = \
-        self.time_decoder(mode, x_encoder, mask=~key_valid_mask)
+        dense_predict, y_hat, pi, x_mode, new_y_hat, new_pi, mode_dense, scal, scal_new, pred_dense_trajs = \
+        self.time_decoder(
+            mode, 
+            x_encoder, 
+            mask=~key_valid_mask,
+            x_attr=data["x_attr"],              
+            x_positions=data["x_positions"],     
+            x_key_valid_mask=data["x_key_valid_mask"],
+        )
 
         if isinstance(self, StreamModelForecast) and self.use_stream_decoder:
             cos, sin = data["theta"].cos(), data["theta"].sin()
@@ -269,6 +316,7 @@ class ModelForecast(nn.Module):
             "new_y_hat": new_y_hat,  # final trajectory output
             "new_pi": new_pi,  # final probability output     
             "scal_new": scal_new,  # final output for Laplace loss
+            "pred_dense_trajs": pred_dense_trajs,  # dense future trajectory output from state query
         }
 
         if isinstance(self, StreamModelForecast):

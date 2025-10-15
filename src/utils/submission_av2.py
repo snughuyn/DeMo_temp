@@ -56,10 +56,15 @@ class SubmissionAv2:
             return global_trajectory, probability
 
         for i, (scene_id, track_id) in enumerate(zip(scenario_ids, track_ids)):
-            self.challenge_submission.predictions[scene_id] = {
-                track_id: (global_trajectory[i], probability[i])
-            }
+            if scene_id not in self.challenge_submission.predictions:
+                self.challenge_submission.predictions[scene_id] = {}
 
+            # agent 단위로 dict에 추가
+            self.challenge_submission.predictions[scene_id][track_id] = (
+                global_trajectory[i],   # (M, 60, 2)
+                probability[i]          # (M,)
+            )
+            
     def generate_submission_file(self):
         print("generating submission file for argoverse 2 motion forecasting challenge")
         self.challenge_submission.to_parquet(self.submission_file)

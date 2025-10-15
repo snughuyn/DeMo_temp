@@ -15,4 +15,4 @@ target:
     num_historical_steps: 50
     sequence_origins: [50]
     radius: 150.0
-    train_mode: 'only_focal'
+    train_mode: 'focal_and_scored'

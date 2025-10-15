@@ -7,11 +7,11 @@ from hydra.utils import instantiate, to_absolute_path
 from importlib import import_module
 
 
-@hydra.main(version_base=None, config_path="./conf/", config_name="config")
+@hydra.main(version_base=None, config_path="./conf/", config_name="config_ETRI_test")
 def main(conf):
     pl.seed_everything(conf.seed)
     output_dir = HydraConfig.get().runtime.output_dir
-    checkpoint = to_absolute_path("ckpts/DeMo.ckpt")  # TODO change to your checkpoint
+    checkpoint = to_absolute_path("/home/yaaaaaaaang/DeMo/outputs/change_av2_ETRI_width_default_baseline_default/best!/checkpoints/best0_5969.ckpt")  # TODO change to your checkpoint
     assert os.path.exists(checkpoint), f"Checkpoint {checkpoint} does not exist"
 
     trainer = pl.Trainer(

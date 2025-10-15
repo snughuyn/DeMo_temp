@@ -16,14 +16,14 @@ save_top_k: 10
 
 data_root:
 checkpoint:
-pretrained_weights:
+pretrained_weights: 
 output: change_${datamodule.name}_${datamodule.phase}_${model.name}_${model.phase}
 
 # trainer
 num_workers: 4
-gpus: 8  # when test, only use 1 gpu; when train/val, use 8 gpus
+gpus: 1  # when test, only use 1 gpu; when train/val, use 8 gpus
 sync_bn: true
-batch_size: 16
+batch_size: 64
 epochs: 60
 warmup_epochs: 10
 
