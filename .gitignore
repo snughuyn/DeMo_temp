@@ -14,3 +14,7 @@ __pycache__/
 data/
 DeMo
 VideoMamba
+
+submission/
+*.parquet
+
