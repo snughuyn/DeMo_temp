@@ -25,3 +25,7 @@ submission/
 
 *.parquet
 
+
+*.parquet
+submission/
+
