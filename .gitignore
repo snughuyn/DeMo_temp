@@ -1,0 +1,16 @@
+datasets/
+outputs/
+logs/
+wandb/
+*.ckpt
+*.pt
+*.pth
+__pycache__/
+*.pyc
+.venv/
+.env
+.vscode/
+.idea/
+data/
+DeMo
+VideoMamba
